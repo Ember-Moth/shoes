@@ -18,6 +18,66 @@ pub trait Resolver: Send + Sync + Debug {
     fn resolve_location(&self, location: &NetLocation) -> ResolveFuture;
 }
 
+/// Resolver wrapper that enforces a timeout on DNS resolution.
+/// Wraps any inner Resolver and fails with TimedOut if resolution takes too long.
+pub struct TimeoutResolver<T> {
+    inner: T,
+    timeout: Duration,
+}
+
+impl<T: Resolver> TimeoutResolver<T> {
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    pub fn new(inner: T) -> Self {
+        Self {
+            inner,
+            timeout: Self::DEFAULT_TIMEOUT,
+        }
+    }
+
+    pub fn with_timeout(inner: T, timeout: Duration) -> Self {
+        Self { inner, timeout }
+    }
+}
+
+impl<T: Resolver> Debug for TimeoutResolver<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimeoutResolver")
+            .field("inner", &self.inner)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+impl<T: Resolver> Resolver for TimeoutResolver<T> {
+    fn resolve_location(&self, location: &NetLocation) -> ResolveFuture {
+        // Fast path: if already an IP address, no resolution needed
+        if location.to_socket_addr_nonblocking().is_some() {
+            let loc = location.clone();
+            return Box::pin(async move {
+                Ok(vec![loc.to_socket_addr_nonblocking().unwrap()])
+            });
+        }
+
+        let inner_future = self.inner.resolve_location(location);
+        let timeout_duration = self.timeout;
+        let location_str = location.to_string();
+
+        Box::pin(async move {
+            match tokio::time::timeout(timeout_duration, inner_future).await {
+                Ok(result) => result,
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "DNS resolution for {} timed out after {:?}",
+                        location_str, timeout_duration
+                    ),
+                )),
+            }
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct NativeResolver;
 
