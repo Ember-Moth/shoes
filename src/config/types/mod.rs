@@ -25,8 +25,12 @@ pub mod transport;
 pub mod tun;
 
 // Re-export all public types for convenience
-pub use client::{ClientConfig, ClientProxyConfig, TlsClientConfig, WebsocketClientConfig};
+#[allow(unused_imports)]
+pub use client::{
+    ClientConfig, ClientProxyConfig, H2MuxConfig, TlsClientConfig, WebsocketClientConfig,
+};
 pub use common::DEFAULT_REALITY_SHORT_ID;
+pub use dns::{DnsConfig, DnsConfigGroup, DnsServerSpec, ExpandedDnsGroup, ExpandedDnsSpec};
 pub use groups::{ClientConfigGroup, Config, NamedPem, PemSource};
 pub use rules::{ClientChain, ClientChainHop, RuleActionConfig, RuleConfig};
 pub use selection::ConfigSelection;
@@ -38,4 +42,3 @@ pub use server::{
 pub use shadowsocks::ShadowsocksConfig;
 pub use transport::{BindLocation, ClientQuicConfig, ServerQuicConfig, TcpConfig, Transport};
 pub use tun::TunConfig;
-pub use dns::{DnsConfig, DnsConfigGroup, DnsServerSpec, ExpandedDnsGroup, ExpandedDnsSpec};

@@ -54,9 +54,7 @@ impl<T: Resolver> Resolver for TimeoutResolver<T> {
         // Fast path: if already an IP address, no resolution needed
         if location.to_socket_addr_nonblocking().is_some() {
             let loc = location.clone();
-            return Box::pin(async move {
-                Ok(vec![loc.to_socket_addr_nonblocking().unwrap()])
-            });
+            return Box::pin(async move { Ok(vec![loc.to_socket_addr_nonblocking().unwrap()]) });
         }
 
         let inner_future = self.inner.resolve_location(location);
@@ -200,9 +198,8 @@ impl Resolver for CachingNativeResolver {
             let port = location.port();
 
             let result = tokio::net::lookup_host((address.clone(), port)).await?;
-            let addrs: Vec<SocketAddr> = result
-                .filter(|addr| !addr.ip().is_unspecified())
-                .collect();
+            let addrs: Vec<SocketAddr> =
+                result.filter(|addr| !addr.ip().is_unspecified()).collect();
 
             if addrs.is_empty() {
                 return Err(std::io::Error::other(format!(
@@ -259,10 +256,7 @@ impl ResolverCache {
     }
 
     /// Async resolve method for convenience.
-    pub async fn resolve_location(
-        &mut self,
-        target: &NetLocation,
-    ) -> std::io::Result<SocketAddr> {
+    pub async fn resolve_location(&mut self, target: &NetLocation) -> std::io::Result<SocketAddr> {
         // Fast path: IP address
         if let Some(socket_addr) = target.to_socket_addr_nonblocking() {
             return Ok(socket_addr);

@@ -253,7 +253,10 @@ impl ParsedDnsUrl {
     }
 
     /// Convert to ParsedDnsServer with a resolved IP address.
-    pub fn to_parsed_server(&self, resolved_ip: Option<IpAddr>) -> Result<ParsedDnsServer, DnsConfigError> {
+    pub fn to_parsed_server(
+        &self,
+        resolved_ip: Option<IpAddr>,
+    ) -> Result<ParsedDnsServer, DnsConfigError> {
         match self {
             Self::System => Ok(ParsedDnsServer::System),
             Self::Udp { host, port } => {
@@ -311,8 +314,9 @@ impl ParsedDnsUrl {
     fn get_ip(host: &DnsHost, resolved_ip: Option<IpAddr>) -> Result<IpAddr, DnsConfigError> {
         match host {
             DnsHost::Ip(ip) => Ok(*ip),
-            DnsHost::Hostname(hostname) => resolved_ip
-                .ok_or_else(|| DnsConfigError::HostnameNotResolved(hostname.clone())),
+            DnsHost::Hostname(hostname) => {
+                resolved_ip.ok_or_else(|| DnsConfigError::HostnameNotResolved(hostname.clone()))
+            }
         }
     }
 }
@@ -540,11 +544,26 @@ mod tests {
     #[test]
     fn test_ip_strategy_serde() {
         // Test deserialization
-        assert_eq!(serde_yaml::from_str::<IpStrategy>("ipv4_only").unwrap(), IpStrategy::Ipv4Only);
-        assert_eq!(serde_yaml::from_str::<IpStrategy>("ipv6_only").unwrap(), IpStrategy::Ipv6Only);
-        assert_eq!(serde_yaml::from_str::<IpStrategy>("ipv4_and_ipv6").unwrap(), IpStrategy::Ipv4AndIpv6);
-        assert_eq!(serde_yaml::from_str::<IpStrategy>("ipv4_then_ipv6").unwrap(), IpStrategy::Ipv4ThenIpv6);
-        assert_eq!(serde_yaml::from_str::<IpStrategy>("ipv6_then_ipv4").unwrap(), IpStrategy::Ipv6ThenIpv4);
+        assert_eq!(
+            serde_yaml::from_str::<IpStrategy>("ipv4_only").unwrap(),
+            IpStrategy::Ipv4Only
+        );
+        assert_eq!(
+            serde_yaml::from_str::<IpStrategy>("ipv6_only").unwrap(),
+            IpStrategy::Ipv6Only
+        );
+        assert_eq!(
+            serde_yaml::from_str::<IpStrategy>("ipv4_and_ipv6").unwrap(),
+            IpStrategy::Ipv4AndIpv6
+        );
+        assert_eq!(
+            serde_yaml::from_str::<IpStrategy>("ipv4_then_ipv6").unwrap(),
+            IpStrategy::Ipv4ThenIpv6
+        );
+        assert_eq!(
+            serde_yaml::from_str::<IpStrategy>("ipv6_then_ipv4").unwrap(),
+            IpStrategy::Ipv6ThenIpv4
+        );
     }
 
     #[test]

@@ -98,25 +98,34 @@ pub fn build_resolver(entries: Vec<ParsedDnsServerEntry>) -> std::io::Result<Arc
             // System resolver uses NativeResolver (ignores chain_group, bootstrap, ip_strategy)
             ParsedDnsServer::System => wrap_resolver(NativeResolver::new(), timeout_secs),
             // All other protocols use HickoryResolver with chain_group, bootstrap, and ip_strategy
-            ParsedDnsServer::Udp { addr } => {
-                wrap_resolver(HickoryResolver::udp(addr, chain, bootstrap, ip_strategy)?, timeout_secs)
-            }
-            ParsedDnsServer::Tcp { addr } => {
-                wrap_resolver(HickoryResolver::tcp(addr, chain, bootstrap, ip_strategy)?, timeout_secs)
-            }
-            ParsedDnsServer::Tls { addr, server_name } => {
-                wrap_resolver(HickoryResolver::tls(addr, server_name, chain, bootstrap, ip_strategy)?, timeout_secs)
-            }
+            ParsedDnsServer::Udp { addr } => wrap_resolver(
+                HickoryResolver::udp(addr, chain, bootstrap, ip_strategy)?,
+                timeout_secs,
+            ),
+            ParsedDnsServer::Tcp { addr } => wrap_resolver(
+                HickoryResolver::tcp(addr, chain, bootstrap, ip_strategy)?,
+                timeout_secs,
+            ),
+            ParsedDnsServer::Tls { addr, server_name } => wrap_resolver(
+                HickoryResolver::tls(addr, server_name, chain, bootstrap, ip_strategy)?,
+                timeout_secs,
+            ),
             ParsedDnsServer::Https {
                 addr,
                 server_name,
                 path,
-            } => wrap_resolver(HickoryResolver::https(addr, server_name, path, chain, bootstrap, ip_strategy)?, timeout_secs),
+            } => wrap_resolver(
+                HickoryResolver::https(addr, server_name, path, chain, bootstrap, ip_strategy)?,
+                timeout_secs,
+            ),
             ParsedDnsServer::H3 {
                 addr,
                 server_name,
                 path,
-            } => wrap_resolver(HickoryResolver::h3(addr, server_name, path, chain, bootstrap, ip_strategy)?, timeout_secs),
+            } => wrap_resolver(
+                HickoryResolver::h3(addr, server_name, path, chain, bootstrap, ip_strategy)?,
+                timeout_secs,
+            ),
         };
 
         resolvers.push(resolver);
@@ -197,10 +206,12 @@ async fn build_entry_from_spec(
                 resolver
             } else {
                 // Parse as URL and build a simple resolver
-                let bootstrap_parsed = ParsedDnsUrl::parse(bootstrap_url)
-                    .map_err(|e| std::io::Error::other(format!(
-                        "invalid bootstrap_url '{}': {}", bootstrap_url, e
-                    )))?;
+                let bootstrap_parsed = ParsedDnsUrl::parse(bootstrap_url).map_err(|e| {
+                    std::io::Error::other(format!(
+                        "invalid bootstrap_url '{}': {}",
+                        bootstrap_url, e
+                    ))
+                })?;
 
                 let bootstrap_server = bootstrap_parsed
                     .to_parsed_server(None)
@@ -233,9 +244,12 @@ async fn build_entry_from_spec(
             let addrs = bootstrap_resolver
                 .resolve_location(&location)
                 .await
-                .map_err(|e| std::io::Error::other(format!(
-                    "failed to resolve DNS server hostname '{}': {}", hostname, e
-                )))?;
+                .map_err(|e| {
+                    std::io::Error::other(format!(
+                        "failed to resolve DNS server hostname '{}': {}",
+                        hostname, e
+                    ))
+                })?;
 
             Some(addrs[0].ip())
         }

@@ -204,7 +204,11 @@ mod tests {
 
         // UDP DNS works directly (not through proxy)
         let result = provider.bind_udp(local_addr, server_addr).await;
-        assert!(result.is_ok(), "bind_udp should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "bind_udp should succeed: {:?}",
+            result.err()
+        );
     }
 
     #[tokio::test]
@@ -259,7 +263,11 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("connection should fail"),
         };
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "should be timeout error");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "should be timeout error"
+        );
 
         // Verify timeout was respected (should complete in ~100ms, not 5+ seconds)
         assert!(
@@ -286,7 +294,11 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("connection should fail"),
         };
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "should be timeout error");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "should be timeout error"
+        );
 
         // Default timeout is 5 seconds; verify it's bounded (less than 10 seconds)
         assert!(
