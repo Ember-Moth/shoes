@@ -370,7 +370,10 @@ async fn handle_h2mux_stream(
     proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
 ) -> io::Result<()> {
-    let InboundStream { stream, request } = inbound;
+    let InboundStream {
+        mut stream,
+        request,
+    } = inbound;
     let is_udp = request.is_udp();
     let packet_addr = request.packet_addr;
     let destination = request.destination;
@@ -385,6 +388,7 @@ async fn handle_h2mux_stream(
 
     if is_udp {
         if !udp_enabled {
+            let _ = stream.shutdown().await;
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "UDP not enabled",
