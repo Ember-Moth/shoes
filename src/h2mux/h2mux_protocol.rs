@@ -141,7 +141,7 @@ impl StreamRequest {
     }
 
     /// Encode stream request to bytes
-    pub fn encode(&self) -> BytesMut {
+    pub fn encode(&self) -> io::Result<BytesMut> {
         let mut buf = BytesMut::with_capacity(64);
 
         let mut flags: u16 = 0;
@@ -153,8 +153,8 @@ impl StreamRequest {
         }
 
         buf.put_u16(flags);
-        encode_socks_address(&mut buf, &self.destination);
-        buf
+        encode_socks_address(&mut buf, &self.destination)?;
+        Ok(buf)
     }
 
     /// Decode stream request from reader
@@ -249,8 +249,9 @@ impl StreamResponse {
     }
 }
 
-/// Encode a NetLocation to SOCKS5 address format
-pub fn encode_socks_address(buf: &mut BytesMut, location: &NetLocation) {
+/// Encode a NetLocation to SOCKS5 address format.
+/// Returns error if hostname exceeds 255 bytes.
+pub fn encode_socks_address(buf: &mut BytesMut, location: &NetLocation) -> io::Result<()> {
     match location.address() {
         Address::Ipv4(ip) => {
             buf.put_u8(0x01);
@@ -261,12 +262,27 @@ pub fn encode_socks_address(buf: &mut BytesMut, location: &NetLocation) {
             buf.put_slice(&ip.octets());
         }
         Address::Hostname(host) => {
+            let host_bytes = host.as_bytes();
+            if host_bytes.len() > 255 {
+                // Truncate hostname in error message to avoid huge logs
+                let preview = std::str::from_utf8(&host_bytes[..64.min(host_bytes.len())])
+                    .unwrap_or("<invalid utf8>");
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "hostname too long: {} bytes (max 255): {}...",
+                        host_bytes.len(),
+                        preview
+                    ),
+                ));
+            }
             buf.put_u8(0x03);
-            buf.put_u8(host.len() as u8);
-            buf.put_slice(host.as_bytes());
+            buf.put_u8(host_bytes.len() as u8);
+            buf.put_slice(host_bytes);
         }
     }
     buf.put_u16(location.port());
+    Ok(())
 }
 
 /// Decode a SOCKS5 address from bytes.
@@ -454,7 +470,7 @@ mod tests {
     async fn test_stream_request_tcp() {
         let dest = NetLocation::new(Address::Hostname("example.com".to_string()), 443);
         let req = StreamRequest::tcp(dest.clone());
-        let encoded = req.encode();
+        let encoded = req.encode().unwrap();
 
         let mut cursor = std::io::Cursor::new(encoded);
         let decoded = StreamRequest::decode_async(&mut cursor).await.unwrap();
@@ -467,7 +483,7 @@ mod tests {
     async fn test_stream_request_udp() {
         let dest = NetLocation::new(Address::Ipv4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 53);
         let req = StreamRequest::udp(dest, true);
-        let encoded = req.encode();
+        let encoded = req.encode().unwrap();
 
         let mut cursor = std::io::Cursor::new(encoded);
         let decoded = StreamRequest::decode_async(&mut cursor).await.unwrap();
@@ -497,7 +513,7 @@ mod tests {
     fn test_encode_socks_address_ipv4() {
         let loc = NetLocation::new(Address::Ipv4(std::net::Ipv4Addr::new(192, 168, 1, 1)), 8080);
         let mut buf = BytesMut::new();
-        encode_socks_address(&mut buf, &loc);
+        encode_socks_address(&mut buf, &loc).unwrap();
 
         assert_eq!(buf[0], 0x01); // IPv4 type
         assert_eq!(&buf[1..5], &[192, 168, 1, 1]);
@@ -508,11 +524,24 @@ mod tests {
     fn test_encode_socks_address_hostname() {
         let loc = NetLocation::new(Address::Hostname("test.com".to_string()), 443);
         let mut buf = BytesMut::new();
-        encode_socks_address(&mut buf, &loc);
+        encode_socks_address(&mut buf, &loc).unwrap();
 
         assert_eq!(buf[0], 0x03); // Domain type
         assert_eq!(buf[1], 8); // Length
         assert_eq!(&buf[2..10], b"test.com");
+    }
+
+    #[test]
+    fn test_encode_socks_address_hostname_too_long() {
+        let long_hostname = "a".repeat(256);
+        let loc = NetLocation::new(Address::Hostname(long_hostname), 443);
+        let mut buf = BytesMut::new();
+        let result = encode_socks_address(&mut buf, &loc);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("hostname too long"));
     }
 
     #[test]

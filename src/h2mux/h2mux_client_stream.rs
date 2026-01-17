@@ -55,7 +55,7 @@ impl H2MuxClientStream {
         response_future: ResponseFuture,
         destination: NetLocation,
         is_tcp: bool,
-    ) -> Self {
+    ) -> io::Result<Self> {
         let (tx, rx) = oneshot::channel();
 
         tokio::spawn(async move {
@@ -84,9 +84,9 @@ impl H2MuxClientStream {
         } else {
             StreamRequest::udp(destination.clone(), false)
         };
-        let request_bytes = Bytes::from(request.encode());
+        let request_bytes = Bytes::from(request.encode()?);
 
-        Self {
+        Ok(Self {
             send,
             recv: None,
             recv_pending: Some(rx),
@@ -96,7 +96,7 @@ impl H2MuxClientStream {
             pending_write: None,
             destination,
             response_read: false,
-        }
+        })
     }
 
     /// Resolve the pending receiver into a RecvStream.

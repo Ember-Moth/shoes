@@ -315,7 +315,7 @@ impl H2MuxClientSession {
 
         // Create unified client stream with lazy response resolution
         let client_stream =
-            H2MuxClientStream::new(send_stream, response_future, destination.clone(), is_tcp);
+            H2MuxClientStream::new(send_stream, response_future, destination.clone(), is_tcp)?;
 
         self.active_streams.fetch_add(1, Ordering::Relaxed);
 
