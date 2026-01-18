@@ -509,6 +509,48 @@ mod tests {
         assert!(encoded.len() > 2);
     }
 
+    #[tokio::test]
+    async fn test_stream_response_error_roundtrip() {
+        let message = "connection refused by server";
+        let resp = StreamResponse::error(message);
+        let encoded = resp.encode();
+
+        let mut cursor = std::io::Cursor::new(encoded);
+        let decoded = StreamResponse::decode(&mut cursor).await.unwrap();
+
+        assert_eq!(decoded.status, STATUS_ERROR);
+        assert_eq!(decoded.message.as_deref(), Some(message));
+    }
+
+    #[tokio::test]
+    async fn test_stream_response_error_long_message() {
+        // Message > 128 chars to test multi-byte varint encoding
+        let message = "x".repeat(200);
+        let resp = StreamResponse::error(&message);
+        let encoded = resp.encode();
+
+        // Verify varint is multi-byte (message len 200 requires 2 bytes)
+        assert!(encoded[1] & 0x80 != 0, "varint should be multi-byte for len > 127");
+
+        let mut cursor = std::io::Cursor::new(encoded);
+        let decoded = StreamResponse::decode(&mut cursor).await.unwrap();
+
+        assert_eq!(decoded.status, STATUS_ERROR);
+        assert_eq!(decoded.message.as_deref(), Some(message.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_stream_response_success_roundtrip() {
+        let resp = StreamResponse::success();
+        let encoded = resp.encode();
+
+        let mut cursor = std::io::Cursor::new(encoded);
+        let decoded = StreamResponse::decode(&mut cursor).await.unwrap();
+
+        assert_eq!(decoded.status, STATUS_SUCCESS);
+        assert!(decoded.message.is_none());
+    }
+
     #[test]
     fn test_encode_socks_address_ipv4() {
         let loc = NetLocation::new(Address::Ipv4(std::net::Ipv4Addr::new(192, 168, 1, 1)), 8080);
