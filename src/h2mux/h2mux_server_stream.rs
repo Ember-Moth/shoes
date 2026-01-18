@@ -12,9 +12,10 @@ use bytes::{BufMut, BytesMut};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::async_stream::{AsyncPing, AsyncStream};
+use crate::util::write_all;
 
 use super::activity_tracker::ActivityTracker;
-use super::h2mux_protocol::STATUS_SUCCESS;
+use super::h2mux_protocol::{StreamResponse, STATUS_SUCCESS};
 use super::h2mux_stream::H2MuxStream;
 
 /// Server stream wrapper that prepends status response to first write.
@@ -61,6 +62,26 @@ impl H2MuxServerStream {
         if let Some(ref activity) = self.activity {
             activity.record_activity();
         }
+    }
+
+    /// Send an error response to the client before closing.
+    ///
+    /// This should be called when rejecting a stream (e.g., UDP disabled).
+    /// After calling this, the stream should be shut down.
+    /// Returns error if response was already written.
+    pub async fn write_error_response(&mut self, message: &str) -> io::Result<()> {
+        if self.response_written {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Response already written",
+            ));
+        }
+
+        let response = StreamResponse::error(message);
+        let encoded = response.encode();
+        write_all(&mut self.inner, &encoded).await?;
+        self.response_written = true;
+        Ok(())
     }
 }
 

@@ -388,6 +388,7 @@ async fn handle_h2mux_stream(
 
     if is_udp {
         if !udp_enabled {
+            let _ = stream.write_error_response("UDP not enabled").await;
             let _ = stream.shutdown().await;
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -440,6 +441,7 @@ async fn handle_h2mux_tcp(
         }
         ConnectDecision::Block => {
             debug!("H2MUX TCP: blocked by rules: {}", destination);
+            let _ = stream.write_error_response("Connection blocked by rules").await;
             let _ = stream.shutdown().await;
             Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
@@ -476,6 +478,7 @@ async fn handle_h2mux_udp(
             run_udp_copy(Box::new(server_stream), client_stream, false, false).await
         }
         ConnectDecision::Block => {
+            let _ = stream.write_error_response("Connection blocked by rules").await;
             let _ = stream.shutdown().await;
             Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
