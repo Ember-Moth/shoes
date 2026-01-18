@@ -319,14 +319,12 @@ fn start_forward_to_dest(
         for record in &dest_records {
             if let Err(e) = write_all(&mut client_stream, record).await {
                 log::debug!("REALITY FALLBACK: Error forwarding record: {}", e);
-                let _ = client_stream.shutdown().await;
-                let _ = dest_stream.shutdown().await;
+                let _ = futures::join!(client_stream.shutdown(), dest_stream.shutdown());
                 return;
             }
             if let Err(e) = client_stream.flush().await {
                 log::debug!("REALITY FALLBACK: Error flushing record: {}", e);
-                let _ = client_stream.shutdown().await;
-                let _ = dest_stream.shutdown().await;
+                let _ = futures::join!(client_stream.shutdown(), dest_stream.shutdown());
                 return;
             }
         }
@@ -334,8 +332,7 @@ fn start_forward_to_dest(
         if !remaining_data.is_empty() {
             if let Err(e) = write_all(&mut client_stream, &remaining_data).await {
                 log::debug!("REALITY FALLBACK: Error forwarding remaining data: {}", e);
-                let _ = client_stream.shutdown().await;
-                let _ = dest_stream.shutdown().await;
+                let _ = futures::join!(client_stream.shutdown(), dest_stream.shutdown());
                 return;
             }
         }
@@ -354,8 +351,7 @@ fn start_forward_to_dest(
         )
         .await;
 
-        let _ = client_stream.shutdown().await;
-        let _ = dest_stream.shutdown().await;
+        let _ = futures::join!(client_stream.shutdown(), dest_stream.shutdown());
 
         if let Err(e) = result {
             log::debug!("REALITY FALLBACK: Connection ended with error: {}", e);
