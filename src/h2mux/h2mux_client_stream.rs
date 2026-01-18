@@ -143,10 +143,10 @@ impl H2MuxClientStream {
         }
 
         let status = self.recv_buf[0];
-        self.recv_buf = self.recv_buf.slice(1..);
 
         match status {
             STATUS_SUCCESS => {
+                self.recv_buf = self.recv_buf.slice(1..);
                 self.response_read = true;
                 log::debug!(
                     "H2MuxClientStream: stream to {} opened successfully",
@@ -154,18 +154,107 @@ impl H2MuxClientStream {
                 );
                 Ok(())
             }
-            STATUS_ERROR => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Stream request to {} failed", self.destination),
-            )),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Invalid status byte: {}", status),
-            )),
+            STATUS_ERROR => {
+                // Parse varint-length-prefixed error message
+                let error_msg = self.read_error_message()?;
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Stream to {} rejected: {}", self.destination, error_msg),
+                ))
+            }
+            _ => {
+                self.recv_buf = self.recv_buf.slice(1..);
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid status byte: {}", status),
+                ))
+            }
         }
     }
 
-    /// Poll for data from the h2 RecvStream.
+    /// Read error message with varint length prefix from recv_buf.
+    /// Returns WouldBlock if more data is needed.
+    fn read_error_message(&mut self) -> io::Result<String> {
+        // Need at least status byte + 1 byte for varint
+        if self.recv_buf.len() < 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "need more data for error message",
+            ));
+        }
+
+        // Parse varint starting after status byte
+        let mut pos = 1;
+        let mut len: usize = 0;
+        let mut shift = 0;
+
+        loop {
+            if pos >= self.recv_buf.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "need more data for varint",
+                ));
+            }
+
+            let byte = self.recv_buf[pos];
+            pos += 1;
+            len |= ((byte & 0x7F) as usize) << shift;
+
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift >= 64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "varint too large",
+                ));
+            }
+        }
+
+        // Check if we have the full message
+        let total_len = pos + len;
+        if self.recv_buf.len() < total_len {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "need more data for error message body",
+            ));
+        }
+
+        // Extract message
+        let msg_bytes = &self.recv_buf[pos..total_len];
+        let message = String::from_utf8_lossy(msg_bytes).to_string();
+
+        // Consume the bytes
+        self.recv_buf = self.recv_buf.slice(total_len..);
+
+        Ok(message)
+    }
+
+    /// Poll the h2 stream directly for new data, bypassing recv_buf.
+    /// Returns Ok(None) on EOF.
+    fn poll_h2_stream(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<Option<Bytes>>> {
+        let recv = self.recv.as_mut().expect("recv should be resolved");
+        match Pin::new(recv).poll_data(cx) {
+            Poll::Ready(Some(Ok(data))) => {
+                let len = data.len();
+                let _ = self
+                    .recv
+                    .as_mut()
+                    .unwrap()
+                    .flow_control()
+                    .release_capacity(len);
+                Poll::Ready(Ok(Some(data)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
+            }
+            Poll::Ready(None) => Poll::Ready(Ok(None)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    /// Poll for data from the h2 RecvStream, returning buffered data first.
     fn poll_recv_data(
         &mut self,
         cx: &mut Context<'_>,
@@ -179,17 +268,8 @@ impl H2MuxClientStream {
             return Poll::Ready(Ok(()));
         }
 
-        let recv = self.recv.as_mut().expect("recv should be resolved");
-        match Pin::new(recv).poll_data(cx) {
-            Poll::Ready(Some(Ok(data))) => {
-                let len = data.len();
-                let _ = self
-                    .recv
-                    .as_mut()
-                    .unwrap()
-                    .flow_control()
-                    .release_capacity(len);
-
+        match self.poll_h2_stream(cx) {
+            Poll::Ready(Ok(Some(data))) => {
                 let to_copy = data.len().min(buf.remaining());
                 buf.put_slice(&data[..to_copy]);
 
@@ -199,8 +279,8 @@ impl H2MuxClientStream {
 
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
-            Poll::Ready(None) => Poll::Ready(Ok(())),
+            Poll::Ready(Ok(None)) => Poll::Ready(Ok(())), // EOF
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -256,34 +336,36 @@ impl AsyncRead for H2MuxClientStream {
                 }
             }
 
-            // If still not read, poll for data
-            if !self.response_read {
-                let mut temp_buf = vec![0u8; 1024];
-                let mut temp_read_buf = ReadBuf::new(&mut temp_buf);
-
-                match self.poll_recv_data(cx, &mut temp_read_buf) {
-                    Poll::Ready(Ok(())) => {
-                        let filled = temp_read_buf.filled();
-                        if filled.is_empty() {
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::UnexpectedEof,
-                                "EOF while reading stream response",
-                            )));
+            // Poll h2 stream directly for NEW data in a loop until we have enough
+            // or get Pending. We use poll_h2_stream (not poll_recv_data) because
+            // poll_recv_data returns recv_buf contents first, which would cause an
+            // infinite loop when recv_buf has partial status data.
+            while !self.response_read {
+                match self.poll_h2_stream(cx) {
+                    Poll::Ready(Ok(Some(data))) => {
+                        // Skip empty data frames to avoid infinite loop
+                        if data.is_empty() {
+                            continue;
                         }
-                        // Append to recv_buf for processing
+
+                        // Append new data to recv_buf
                         let mut new_buf =
-                            BytesMut::with_capacity(self.recv_buf.len() + filled.len());
+                            BytesMut::with_capacity(self.recv_buf.len() + data.len());
                         new_buf.put_slice(&self.recv_buf);
-                        new_buf.put_slice(filled);
+                        new_buf.put_slice(&data);
                         self.recv_buf = new_buf.freeze();
 
                         match self.read_status_response() {
-                            Ok(()) => {}
-                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                return Poll::Pending;
-                            }
+                            Ok(()) => break,
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                             Err(e) => return Poll::Ready(Err(e)),
                         }
+                    }
+                    Poll::Ready(Ok(None)) => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "EOF while reading stream response",
+                        )));
                     }
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => return Poll::Pending,
