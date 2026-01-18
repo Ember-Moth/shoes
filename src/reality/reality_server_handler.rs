@@ -316,10 +316,15 @@ fn start_forward_to_dest(
     remaining_data: Bytes,
 ) {
     tokio::spawn(async move {
-        // Forward any already-read dest records to the client
         for record in &dest_records {
             if let Err(e) = write_all(&mut client_stream, record).await {
                 log::debug!("REALITY FALLBACK: Error forwarding record: {}", e);
+                let _ = client_stream.shutdown().await;
+                let _ = dest_stream.shutdown().await;
+                return;
+            }
+            if let Err(e) = client_stream.flush().await {
+                log::debug!("REALITY FALLBACK: Error flushing record: {}", e);
                 let _ = client_stream.shutdown().await;
                 let _ = dest_stream.shutdown().await;
                 return;
@@ -335,13 +340,6 @@ fn start_forward_to_dest(
             }
         }
 
-        if let Err(e) = client_stream.flush().await {
-            log::debug!("REALITY FALLBACK: Error flushing: {}", e);
-            let _ = client_stream.shutdown().await;
-            let _ = dest_stream.shutdown().await;
-            return;
-        }
-
         log::debug!(
             "REALITY FALLBACK: Forwarded {} records + {} remaining bytes, starting bidirectional copy",
             dest_records.len(),
@@ -351,8 +349,8 @@ fn start_forward_to_dest(
         let result = crate::copy_bidirectional::copy_bidirectional(
             &mut *client_stream,
             &mut dest_stream,
-            false, // client doesn't need initial flush
-            false, // dest doesn't need initial flush
+            !remaining_data.is_empty(), // flush the client if we wrote remaining data
+            false,
         )
         .await;
 
@@ -360,9 +358,7 @@ fn start_forward_to_dest(
         let _ = dest_stream.shutdown().await;
 
         if let Err(e) = result {
-            log::debug!("REALITY FALLBACK: Connection ended: {}", e);
-        } else {
-            log::debug!("REALITY FALLBACK: Connection completed");
+            log::debug!("REALITY FALLBACK: Connection ended with error: {}", e);
         }
     });
 }
