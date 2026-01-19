@@ -31,11 +31,11 @@ use super::h2mux_stream::H2MuxStream;
 use super::prepend_stream::PrependStream;
 
 /// HTTP/2 window and frame size configuration
-const WINDOW_SIZE: u32 = 1024 * 1024; // 1 MB
-const MAX_FRAME_SIZE: u32 = 16384; // 16 KB (HTTP/2 default)
+const WINDOW_SIZE: u32 = 256 * 1024; // 256 KB
+const MAX_FRAME_SIZE: u32 = (1 << 24) - 1; // ~16 MB (max allowed by HTTP/2)
 
 /// Channel buffer size for inbound streams
-const INBOUND_BUFFER: usize = 32;
+const INBOUND_BUFFER: usize = 128;
 
 /// An incoming stream with its destination
 pub struct InboundStream {
@@ -112,6 +112,7 @@ impl H2MuxServerSession {
             .initial_window_size(WINDOW_SIZE)
             .initial_connection_window_size(WINDOW_SIZE)
             .max_frame_size(MAX_FRAME_SIZE)
+            .max_concurrent_streams(1024)
             .handshake(conn)
             .await
             .map_err(|e| {
@@ -441,7 +442,9 @@ async fn handle_h2mux_tcp(
         }
         ConnectDecision::Block => {
             debug!("H2MUX TCP: blocked by rules: {}", destination);
-            let _ = stream.write_error_response("Connection blocked by rules").await;
+            let _ = stream
+                .write_error_response("Connection blocked by rules")
+                .await;
             let _ = stream.shutdown().await;
             Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
@@ -478,7 +481,9 @@ async fn handle_h2mux_udp(
             run_udp_copy(Box::new(server_stream), client_stream, false, false).await
         }
         ConnectDecision::Block => {
-            let _ = stream.write_error_response("Connection blocked by rules").await;
+            let _ = stream
+                .write_error_response("Connection blocked by rules")
+                .await;
             let _ = stream.shutdown().await;
             Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
