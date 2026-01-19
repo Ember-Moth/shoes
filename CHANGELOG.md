@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.2.6
+
+### New Features
+
+#### H2MUX (sing-box Compatible HTTP/2 Multiplexing)
+
+H2MUX multiplexes multiple proxy streams over a single HTTP/2 connection, reducing connection overhead and improving performance for many concurrent streams. This is compatible with sing-box's h2mux implementation.
+
+**Client configuration (VMess, VLESS, Trojan):**
+```yaml
+client_chain:
+  address: "example.com:443"
+  protocol:
+    type: tls
+    protocol:
+      type: vmess
+      cipher: aes-128-gcm
+      user_id: "uuid"
+      h2mux:
+        max_connections: 4    # Maximum connections to maintain
+        min_streams: 4        # Min streams before opening new connection
+        max_streams: 0        # Max streams per connection (0 = unlimited)
+        padding: true         # Enable padding for traffic obfuscation
+```
+
+**Server support:** H2MUX is auto-detected on the server side for VMess, VLESS, Trojan, Shadowsocks, and Snell protocols. No server configuration changes are needed.
+
+#### H2MUX Client Compatibility
+
+The Go H2MUX library contained a bug that prevents data upload from finishing successfully, see [https://github.com/SagerNet/sing-mux/pull/8](https://github.com/SagerNet/sing-mux/pull/8)
+
+sing-box now contains this fix, but other clients (eg mihomo) that depend on sing-mux without this change can have issues.
+
+#### DNS Resolution Timeout
+
+DNS servers now support a configurable timeout to prevent hanging on unresponsive DNS servers.
+
+```yaml
+- dns_group: my-dns
+  servers:
+    - url: "tls://dns.example.com"
+      timeout_secs: 10      # Default: 5. Set to 0 to disable.
+```
+
+### Improvements
+
+- **DNS connection timeout**: DNS-over-TLS/HTTPS connections now respect a 5-second connection timeout, preventing hangs when DNS servers are unreachable
+- **Reality server**: Improved shutdown handling with proper flush after every forward operation
+
 ## v0.2.5
 
 ### New Features
