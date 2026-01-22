@@ -22,6 +22,7 @@
 //! // Detected via magic destination "sp.mux.sing-box.arpa:444"
 //! ```
 
+mod activity_tracked_stream;
 mod activity_tracker;
 mod h2mux_client_handler;
 mod h2mux_client_session;
