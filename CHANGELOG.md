@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.7
+
+### Improvements
+
+#### H2MUX Stability
+- Added connection-level activity tracking that counts HTTP/2 control frames (PING, SETTINGS) as activity, ensuring keepalives properly reset idle detection
+- Removed application-level idle timeout in favor of PING-based dead connection detection, matching sing-mux behavior for better compatibility
+- Added drain timeout for graceful session shutdown
+- Updated window sizes to match Go http2 defaults (256KB per stream, 1MB per connection)
+
+#### AnyTLS Memory Leak Fixes
+- Stream handler tasks are now tracked and aborted when session closes, preventing memory leaks from orphaned tasks
+- Added 5-minute stream handler timeout to prevent hung streams (slow DNS, stuck connections) from leaking memory
+- Reduced allocations in padding frame generation
+
+#### TUN Connection Tracking
+- Refactored TCP connection state machine with explicit states (Normal, Close, Closing, Closed) for proper lifecycle management
+- Improved connection teardown handling following shadowsocks-rust patterns
+
 ## v0.2.6
 
 ### New Features
