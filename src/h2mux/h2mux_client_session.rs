@@ -1,7 +1,8 @@
 //! H2MUX Client Session
 //!
 //! Manages a single HTTP/2 connection for multiplexing multiple streams.
-//! Includes idle timeout, PING keepalive, and stream open timeout.
+//! Matches sing-mux behavior: uses PING keepalive to detect dead connections,
+//! but has no application-level idle timeout (relies on session pool cleanup).
 
 use std::io;
 use std::sync::Arc;
@@ -18,24 +19,22 @@ use crate::address::NetLocation;
 use crate::async_stream::AsyncStream;
 
 use super::H2MuxOptions;
-use super::activity_tracker::{
-    ActivityTracker, IDLE_TIMEOUT, PING_INTERVAL, PING_TIMEOUT, STREAM_OPEN_TIMEOUT,
-};
+use super::activity_tracker::{PING_INTERVAL, PING_TIMEOUT, STREAM_OPEN_TIMEOUT};
 use super::h2mux_client_stream::H2MuxClientStream;
 use super::h2mux_padding::H2MuxPaddingStream;
 use super::h2mux_protocol::SessionRequest;
 
 /// HTTP/2 window and frame size configuration.
-/// Using defaults that match golang's http2 package for compatibility.
-const WINDOW_SIZE: u32 = 256 * 1024; // 256 KB
+const STREAM_WINDOW_SIZE: u32 = 256 * 1024; // 256 KB per stream
+const CONNECTION_WINDOW_SIZE: u32 = 1 << 20; // 1 MB (matches Go's http2 default)
 const MAX_FRAME_SIZE: u32 = (1 << 24) - 1; // ~16 MB (max allowed by HTTP/2)
 
 /// Client session managing multiplexed streams over a single H2 connection.
 ///
-/// Includes:
-/// - Idle timeout (30s) - closes session when no activity
+/// Matches sing-mux behavior:
 /// - PING keepalive (30s) - detects dead connections
 /// - Stream open timeout (5s) - prevents hanging on unresponsive servers
+/// - No application-level idle timeout (session pool handles cleanup)
 pub struct H2MuxClientSession {
     send_request: h2::client::SendRequest<Bytes>,
     /// Handle to abort the connection driver on drop
@@ -44,9 +43,7 @@ pub struct H2MuxClientSession {
     /// Approximate count of open streams. Only incremented, never decremented.
     /// TODO: For proper session pooling, wrap streams in a guard that decrements on drop.
     active_streams: AtomicU32,
-    /// Tracks last activity for idle timeout
-    activity: ActivityTracker,
-    /// Closed flag - set by idle watchdog or ping failure
+    /// Closed flag - set by ping failure or connection error
     is_closed: Arc<AtomicBool>,
 }
 
@@ -80,7 +77,6 @@ impl Clone for H2MuxClientSession {
             driver_handle: Arc::clone(&self.driver_handle),
             padding_enabled: self.padding_enabled,
             active_streams: AtomicU32::new(self.active_streams.load(Ordering::Relaxed)),
-            activity: self.activity.clone(),
             is_closed: Arc::clone(&self.is_closed),
         }
     }
@@ -117,8 +113,8 @@ impl H2MuxClientSession {
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (send_request, mut connection) = h2::client::Builder::new()
-            .initial_window_size(WINDOW_SIZE)
-            .initial_connection_window_size(WINDOW_SIZE)
+            .initial_window_size(STREAM_WINDOW_SIZE)
+            .initial_connection_window_size(CONNECTION_WINDOW_SIZE)
             .max_frame_size(MAX_FRAME_SIZE)
             .max_concurrent_streams(1024)
             .handshake(conn)
@@ -133,7 +129,6 @@ impl H2MuxClientSession {
         // Take ping_pong handle before spawning - can only be called once
         let ping_pong = connection.ping_pong();
 
-        let activity = ActivityTracker::new();
         let is_closed = Arc::new(AtomicBool::new(false));
 
         // Spawn connection driver
@@ -144,12 +139,10 @@ impl H2MuxClientSession {
         })
         .abort_handle();
 
-        // Spawn idle timeout watchdog
-        Self::spawn_idle_watchdog(activity.clone(), Arc::clone(&is_closed));
-
-        // Spawn PING keepalive task
+        // Spawn PING keepalive task to detect dead connections
+        // (matches Go's http2.Transport.ReadIdleTimeout behavior)
         if let Some(pp) = ping_pong {
-            Self::spawn_ping_task(pp, activity.clone(), Arc::clone(&is_closed));
+            Self::spawn_ping_task(pp, Arc::clone(&is_closed));
         }
 
         debug!("H2MuxClientSession: ready for multiplexing");
@@ -159,46 +152,15 @@ impl H2MuxClientSession {
             driver_handle: Arc::new(DriverHandle(abort_handle)),
             padding_enabled,
             active_streams: AtomicU32::new(0),
-            activity,
             is_closed,
         })
     }
 
-    /// Spawn idle timeout watchdog task.
-    /// Checks periodically and marks session closed when idle too long.
-    fn spawn_idle_watchdog(activity: ActivityTracker, is_closed: Arc<AtomicBool>) {
-        tokio::spawn(async move {
-            // Check 6 times per timeout period for responsiveness
-            let check_interval = IDLE_TIMEOUT / 6;
-            let mut timer = interval(check_interval);
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // Skip the first tick which returns immediately
-            timer.tick().await;
-
-            loop {
-                timer.tick().await;
-
-                if is_closed.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                if activity.is_idle(IDLE_TIMEOUT) {
-                    debug!("H2MUX client: idle timeout reached");
-                    is_closed.store(true, Ordering::Relaxed);
-                    break;
-                }
-            }
-        });
-    }
-
-    /// Spawn PING keepalive task.
-    /// Sends periodic PINGs when idle to detect dead connections.
-    /// PING does NOT reset idle timeout (per Go http2 spec).
-    fn spawn_ping_task(
-        mut ping_pong: PingPong,
-        activity: ActivityTracker,
-        is_closed: Arc<AtomicBool>,
-    ) {
+    /// Spawn PING keepalive task to detect dead connections.
+    ///
+    /// Sends periodic PINGs to verify the server is still responsive.
+    /// Matches Go's http2.Transport.ReadIdleTimeout behavior.
+    fn spawn_ping_task(mut ping_pong: PingPong, is_closed: Arc<AtomicBool>) {
         tokio::spawn(async move {
             let mut timer = interval(PING_INTERVAL);
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -212,16 +174,9 @@ impl H2MuxClientSession {
                     break;
                 }
 
-                // Only ping if connection has been idle
-                if activity.idle_duration() < PING_INTERVAL {
-                    continue;
-                }
-
                 // Send PING and wait for PONG
                 match tokio::time::timeout(PING_TIMEOUT, ping_pong.ping(Ping::opaque())).await {
                     Ok(Ok(_pong)) => {
-                        // PING successful - connection is alive
-                        // Note: Do NOT record_activity() - PING doesn't reset idle timeout
                         debug!("H2MUX client: PING/PONG successful");
                     }
                     Ok(Err(e)) => {
@@ -302,9 +257,6 @@ impl H2MuxClientSession {
         destination: &NetLocation,
         is_tcp: bool,
     ) -> io::Result<Box<dyn AsyncStream>> {
-        // Record activity - opening a stream counts
-        self.activity.record_activity();
-
         // Create CONNECT request - h2 crate handles proper pseudo-header encoding
         let http_request = Request::builder()
             .method(Method::CONNECT)

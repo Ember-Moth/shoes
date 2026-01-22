@@ -8,11 +8,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Timeout constants matching sing-mux behavior.
-/// These are hardcoded in sing-mux (not configurable).
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// IDLE_TIMEOUT is set to 60s (2x sing-mux's 30s) for extra margin. Our server
+/// wraps the connection with ActivityTrackedStream so that ALL HTTP/2 frames
+/// (including PING, SETTINGS, WINDOW_UPDATE) count as activity.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PING_INTERVAL: Duration = Duration::from_secs(30);
 pub const PING_TIMEOUT: Duration = Duration::from_secs(5);
 pub const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Grace period after graceful shutdown before forcing connection close.
+/// Allows in-flight streams to complete while preventing indefinite hangs.
+pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Tracks connection activity for idle timeout detection.
 ///

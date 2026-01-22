@@ -2,7 +2,6 @@
 //!
 //! Wraps H2MuxStream with sing-mux server protocol handling:
 //! - Status response is prepended to first write (like sing-mux serverConn)
-//! - Optional activity tracking for connection idle timeout
 
 use std::io;
 use std::pin::Pin;
@@ -14,7 +13,6 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::async_stream::{AsyncPing, AsyncStream};
 use crate::util::write_all;
 
-use super::activity_tracker::ActivityTracker;
 use super::h2mux_protocol::{StreamResponse, STATUS_SUCCESS};
 use super::h2mux_stream::H2MuxStream;
 
@@ -26,27 +24,14 @@ pub struct H2MuxServerStream {
     inner: H2MuxStream,
     /// Whether we've written the status response
     response_written: bool,
-    /// Optional activity tracker for connection idle timeout
-    activity: Option<ActivityTracker>,
 }
 
 impl H2MuxServerStream {
-    /// Create without activity tracking.
-    #[allow(dead_code)]
+    /// Create a new server stream wrapper.
     pub fn new(inner: H2MuxStream) -> Self {
         Self {
             inner,
             response_written: false,
-            activity: None,
-        }
-    }
-
-    /// Create with activity tracker for idle timeout support.
-    pub fn with_activity(inner: H2MuxStream, activity: ActivityTracker) -> Self {
-        Self {
-            inner,
-            response_written: false,
-            activity: Some(activity),
         }
     }
 
@@ -54,14 +39,6 @@ impl H2MuxServerStream {
     #[allow(dead_code)]
     pub fn inner_mut(&mut self) -> &mut H2MuxStream {
         &mut self.inner
-    }
-
-    /// Record activity if tracker is present.
-    #[inline]
-    fn record_activity(&self) {
-        if let Some(ref activity) = self.activity {
-            activity.record_activity();
-        }
     }
 
     /// Send an error response to the client before closing.
@@ -91,16 +68,7 @@ impl AsyncRead for H2MuxServerStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
-
-        // Record activity on successful read with data
-        if let Poll::Ready(Ok(())) = &result {
-            if buf.filled().len() > 0 {
-                self.record_activity();
-            }
-        }
-
-        result
+        Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
 
@@ -111,7 +79,7 @@ impl AsyncWrite for H2MuxServerStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         // First write prepends the status response
-        let result = if !self.response_written {
+        if !self.response_written {
             // Create combined buffer: status + data
             let mut combined = BytesMut::with_capacity(1 + buf.len());
             combined.put_u8(STATUS_SUCCESS);
@@ -132,16 +100,7 @@ impl AsyncWrite for H2MuxServerStream {
             }
         } else {
             Pin::new(&mut self.inner).poll_write(cx, buf)
-        };
-
-        // Record activity on successful write
-        if let Poll::Ready(Ok(n)) = &result {
-            if *n > 0 {
-                self.record_activity();
-            }
         }
-
-        result
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

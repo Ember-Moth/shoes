@@ -23,7 +23,8 @@ use crate::uot::UotV1ServerStream;
 use crate::vless::VlessMessageStream;
 
 use super::MuxProtocol;
-use super::activity_tracker::{ActivityTracker, IDLE_TIMEOUT};
+use super::activity_tracked_stream::ActivityTrackedStream;
+use super::activity_tracker::{ActivityTracker, IDLE_TIMEOUT, SHUTDOWN_DRAIN_TIMEOUT};
 use super::h2mux_padding::H2MuxPaddingStream;
 use super::h2mux_protocol::{SessionRequest, StreamRequest};
 use super::h2mux_server_stream::H2MuxServerStream;
@@ -31,7 +32,8 @@ use super::h2mux_stream::H2MuxStream;
 use super::prepend_stream::PrependStream;
 
 /// HTTP/2 window and frame size configuration
-const WINDOW_SIZE: u32 = 256 * 1024; // 256 KB
+const STREAM_WINDOW_SIZE: u32 = 256 * 1024; // 256 KB per stream
+const CONNECTION_WINDOW_SIZE: u32 = 1 << 20; // 1 MB (matches Go's http2 default)
 const MAX_FRAME_SIZE: u32 = (1 << 24) - 1; // ~16 MB (max allowed by HTTP/2)
 
 /// Channel buffer size for inbound streams
@@ -107,10 +109,17 @@ impl H2MuxServerSession {
         let (inbound_tx, inbound_rx) = mpsc::channel(INBOUND_BUFFER);
         let is_closed = Arc::new(AtomicBool::new(false));
 
+        // Create activity tracker for idle timeout.
+        // Wrap the connection with ActivityTrackedStream so that ALL HTTP/2 frames
+        // (including PING, SETTINGS, WINDOW_UPDATE) count as activity,
+        // matching Go's http2.Server.IdleTimeout behavior.
+        let activity = ActivityTracker::new();
+        let conn = ActivityTrackedStream::new(conn, activity.clone());
+
         // Perform H2 server handshake
         let connection = h2::server::Builder::new()
-            .initial_window_size(WINDOW_SIZE)
-            .initial_connection_window_size(WINDOW_SIZE)
+            .initial_window_size(STREAM_WINDOW_SIZE)
+            .initial_connection_window_size(CONNECTION_WINDOW_SIZE)
             .max_frame_size(MAX_FRAME_SIZE)
             .max_concurrent_streams(1024)
             .handshake(conn)
@@ -123,9 +132,6 @@ impl H2MuxServerSession {
             })?;
 
         debug!("H2MuxServerSession: H2 handshake complete");
-
-        // Create activity tracker for idle timeout
-        let activity = ActivityTracker::new();
 
         // Spawn acceptor task with idle timeout monitoring
         let is_closed_clone = Arc::clone(&is_closed);
@@ -142,6 +148,9 @@ impl H2MuxServerSession {
     }
 
     /// Accept loop - handles incoming H2 streams with idle timeout.
+    ///
+    /// Activity tracking is handled at the IO level by ActivityTrackedStream,
+    /// so we don't need to manually record activity on stream accept/read/write.
     async fn accept_loop(
         mut connection: h2::server::Connection<impl AsyncRead + AsyncWrite + Unpin, Bytes>,
         inbound_tx: mpsc::Sender<InboundStream>,
@@ -161,14 +170,9 @@ impl H2MuxServerSession {
                 result = connection.accept() => {
                     match result {
                         Some(Ok((request, respond))) => {
-                            // New stream = activity
-                            activity.record_activity();
-
-                            // Spawn handler for this stream
                             let inbound_tx = inbound_tx.clone();
-                            let stream_activity = activity.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_stream(request, respond, inbound_tx, stream_activity).await {
+                                if let Err(e) = Self::handle_stream(request, respond, inbound_tx).await {
                                     debug!("H2MuxServerSession: stream error: {}", e);
                                 }
                             });
@@ -191,25 +195,31 @@ impl H2MuxServerSession {
                         debug!("H2MuxServerSession: idle timeout, initiating graceful shutdown");
                         // Send GOAWAY and allow existing streams to complete
                         connection.graceful_shutdown();
-                        // Drain remaining accepts until connection closes
-                        // Must break on errors to avoid busy-loop
-                        while let Some(result) = connection.accept().await {
-                            match result {
-                                Ok((request, respond)) => {
-                                    // Handle streams that arrived before GOAWAY was processed
-                                    let inbound_tx = inbound_tx.clone();
-                                    let stream_activity = activity.clone();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = Self::handle_stream(request, respond, inbound_tx, stream_activity).await {
-                                            debug!("H2MuxServerSession: stream error during drain: {}", e);
-                                        }
-                                    });
-                                }
-                                Err(e) => {
-                                    debug!("H2MuxServerSession: error during drain, stopping: {}", e);
-                                    break;
+
+                        // Drain remaining accepts with a timeout to prevent indefinite hangs.
+                        // Without this timeout, if the client keeps the TCP connection open
+                        // (e.g., with keepalive PINGs), accept().await can block forever.
+                        let drain_result = tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, async {
+                            while let Some(result) = connection.accept().await {
+                                match result {
+                                    Ok((request, respond)) => {
+                                        let inbound_tx = inbound_tx.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(e) = Self::handle_stream(request, respond, inbound_tx).await {
+                                                debug!("H2MuxServerSession: stream error during drain: {}", e);
+                                            }
+                                        });
+                                    }
+                                    Err(e) => {
+                                        debug!("H2MuxServerSession: error during drain, stopping: {}", e);
+                                        break;
+                                    }
                                 }
                             }
+                        }).await;
+
+                        if drain_result.is_err() {
+                            debug!("H2MuxServerSession: drain timeout, forcing close");
                         }
                         break;
                     }
@@ -226,7 +236,6 @@ impl H2MuxServerSession {
         request: http::Request<h2::RecvStream>,
         mut respond: h2::server::SendResponse<Bytes>,
         inbound_tx: mpsc::Sender<InboundStream>,
-        activity: ActivityTracker,
     ) -> io::Result<()> {
         // Send 200 OK response
         let response = Response::builder()
@@ -252,8 +261,7 @@ impl H2MuxServerSession {
         );
 
         // Wrap with server stream that sends status on first write
-        // Include activity tracker for read/write tracking
-        let server_stream = H2MuxServerStream::with_activity(stream, activity);
+        let server_stream = H2MuxServerStream::new(stream);
 
         // Send to inbound channel
         let inbound = InboundStream {
