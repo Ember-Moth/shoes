@@ -236,11 +236,11 @@ impl H2MuxServerSession {
         let response = Response::builder()
             .status(http::StatusCode::OK)
             .body(())
-            .map_err(io::Error::other)?;
+            .map_err(|e| io::Error::other(format!("failed to build H2 response: {e}")))?;
 
         let send_stream = respond
             .send_response(response, false)
-            .map_err(io::Error::other)?;
+            .map_err(|e| io::Error::other(format!("failed to send H2 response: {e}")))?;
 
         let recv_stream = request.into_body();
 
