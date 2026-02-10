@@ -275,7 +275,10 @@ impl DirectDevice {
             }
             Ok(_) => {
                 // n == 0 means EOF
-                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "TUN device closed (EOF)"))
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "TUN device closed (EOF)",
+                ))
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 // Buffer is returned to pool when dropped
@@ -716,18 +719,18 @@ fn run_direct_stack_thread(
             // but this counter acts as a backstop: after 10 consecutive
             // non-EINTR errors with no successful reads in between, treat
             // the fd as dead.
-            if let Err(e) = phy_wait(fd, wait_duration) {
-                if e.kind() != io::ErrorKind::Interrupted {
-                    phy_wait_error_count += 1;
-                    if phy_wait_error_count >= MAX_PHY_WAIT_ERRORS {
-                        error!(
-                            "select() failed {} consecutive times (last: {}). Stack thread stopping.",
-                            phy_wait_error_count, e
-                        );
-                        running.store(false, Ordering::Relaxed);
-                    } else {
-                        warn!("select() error ({}): {}", phy_wait_error_count, e);
-                    }
+            if let Err(e) = phy_wait(fd, wait_duration)
+                && e.kind() != io::ErrorKind::Interrupted
+            {
+                phy_wait_error_count += 1;
+                if phy_wait_error_count >= MAX_PHY_WAIT_ERRORS {
+                    error!(
+                        "select() failed {} consecutive times (last: {}). Stack thread stopping.",
+                        phy_wait_error_count, e
+                    );
+                    running.store(false, Ordering::Relaxed);
+                } else {
+                    warn!("select() error ({}): {}", phy_wait_error_count, e);
                 }
             }
         }
@@ -964,8 +967,7 @@ fn write_all(fd: RawFd, buf: &[u8]) -> io::Result<()> {
         };
         if n < 0 {
             let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::ENOBUFS)
-                || err.kind() == io::ErrorKind::WouldBlock
+            if err.raw_os_error() == Some(libc::ENOBUFS) || err.kind() == io::ErrorKind::WouldBlock
             {
                 trace!("TUN write {}, packet dropped", err);
                 return Ok(());
@@ -1079,14 +1081,23 @@ mod tests {
             };
             if n < 0 {
                 let err = io::Error::last_os_error();
-                assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "unexpected error: {}", err);
+                assert_eq!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock,
+                    "unexpected error: {}",
+                    err
+                );
                 break;
             }
         }
 
         // Now write_all should drop the packet gracefully
         let result = write_all(writer_fd, &[1, 2, 3]);
-        assert!(result.is_ok(), "write_all should return Ok on EAGAIN, got {:?}", result);
+        assert!(
+            result.is_ok(),
+            "write_all should return Ok on EAGAIN, got {:?}",
+            result
+        );
 
         unsafe { libc::close(writer_fd) };
         drop(reader);
